@@ -1,0 +1,10 @@
+#!/usr/bin/env node
+
+require('commander')
+  .version(require('../package').version)
+  .usage('<command> [options]')
+  .command('patch', 'setup a project specialed the name and version')
+  .command('init', 'create a new project, download from nodeModule')
+  .command('update', 'update the project of special')
+  .parse(process.argv)
+

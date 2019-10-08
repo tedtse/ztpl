@@ -1,0 +1,169 @@
+#!/usr/bin/env node
+
+var argv = require('minimist')(process.argv.slice(2))
+var chalk = require('chalk')
+var co = require('co')
+var copyfiles = require('copyfiles')
+var exists = require('fs').existsSync
+var fs = require('fs')
+var json5 = require('json5')
+var ora = require('ora')
+var path = require('path')
+var program = require('commander')
+var rm = require('rimraf').sync
+var shell = require('shelljs')
+var config = require('../lib/config.js')
+var declare = require('../lib/declare.js')
+var utils = require('../lib/utils.js')
+var currentPath = process.cwd()
+
+var templateJSON
+var templateName
+var templateVersion
+var destPath
+var tplPath
+var debugMode = !!argv.debug
+
+program
+  .usage('<template-name> [project-name]')
+
+// co异步调用
+co(gen)
+
+// init 主流程
+function * gen () {
+  if (!debugMode) {
+    // 正常模式
+    yield generateTempPackageJSON()
+    yield downloadTpl()
+    yield generatePackageJSON()
+    yield generateGitignore()
+    yield copyTplToDestPath()
+    yield executePostHook()
+    yield removeUnnecessaryFiles()
+  } else {
+    // debug 模式
+    yield generateTempPackageJSON()
+    yield copyDebugTpl()
+    yield generatePackageJSON()
+    yield generateGitignore()
+    yield copyTplToDestPath()
+    yield executePostHook()
+    yield removeUnnecessaryFiles()
+  }
+}
+
+// 生成临时 package.json 到当前目录。
+// 因为大部分版本 NPM 在当前目录下没有 package.json 文件不能有效地执行 npm 命令
+function generateTempPackageJSON () {
+  return new Promise(function (resolve, reject) {
+    var tpl = fs.readFileSync(path.resolve(__dirname, '../tpl/package.json.tpl'), declare.encoding)
+    fs.writeFileSync(
+      currentPath + '/package.json',
+      JSON.stringify(json5.parse(tpl), null, 2),
+      { encoding: declare.encoding }
+    )
+    resolve()
+  })
+}
+
+// 下载 NPM 包模板
+function downloadTpl () {
+  if (!argv._.length) {
+    console.error(chalk.red('Can not find projectName, please input'))
+    process.exit(1)
+  }
+  templateName = argv._[0].replace(/@\d+\.\d+\.\d+/, '')
+  return new Promise(function (resolve, reject) {
+    var spinner = ora('downloading template')
+    spinner.start()
+    var result = shell.exec('npm install ' + argv._[0] + ' --no-save --no-optional')
+    templateVersion = result.stdout.match(/@(\d+\.\d+\.\d+)/) ? RegExp.$1 : ''
+    spinner.stop()
+    resolve()
+  })
+}
+
+// 生成 package.json
+function generatePackageJSON () {
+  if (debugMode) {
+    tplPath = declare.debugDirectory
+  } else {
+    tplPath = declare.nodeModules + '/' + templateName
+  }
+  destPath = argv._[1] || '.'
+  return require('../lib/generate-package-json.js')(destPath, tplPath)
+    .then(function () {
+      return utils.writeTplInfoToPackageJSON(templateName, templateVersion)
+    })
+}
+
+// 生成 .gitignore
+function generateGitignore () {
+  return new Promise(function (resolve, reject) {
+    var tpl = fs.readFileSync(path.resolve(__dirname, '../tpl/.gitignore.tpl'), declare.encoding)
+    fs.writeFileSync(
+      currentPath + '/.gitignore',
+      tpl,
+      { encoding: declare.encoding }
+    )
+    resolve()
+  })
+}
+
+// 将下载后的模板复制到指定目录
+function copyTplToDestPath () {
+  var directions = [ tplPath + '/**/*', destPath ]
+  var options = {
+    up: utils.depth(tplPath) + 1,
+    exclude: [
+      tplPath + '/package.json',
+      tplPath + '/package-lock.json',
+      tplPath + '/' + declare.templateSetting + '/**/*',
+      tplPath + '/.git/**/*'
+    ],
+    soft: false,
+    all: true
+  }
+  return new Promise(function (resolve, reject) {
+    copyfiles(directions, options, function (err) {
+      if (err) {
+        reject()
+        console.error(chalk.red(err))
+        process.exit(1)
+      } else {
+        resolve()
+      }
+    })
+  })
+}
+
+// 执行钩子函数
+function executePostHook () {
+  var packageJSON = utils.getPackageJSON()
+  return utils.executeHook(debugMode, 'post-hook', packageJSON)
+}
+
+// 删除多余的文件
+function removeUnnecessaryFiles () {
+  return new Promise(function (resolve, reject) {
+    if (debugMode) {
+      rm(declare.debugDirectory)
+      rm(currentPath + '/package-lock.json')
+    } else {
+      rm(declare.nodeModules)
+      rm(currentPath + '/package-lock.json')
+    }
+    console.log(chalk.green('The project init complete !'))
+    resolve()
+  })
+}
+
+// 复制调试项目到本地
+function copyDebugTpl () {
+  return new Promise(function (resolve, reject) {
+    rm(currentPath + '/' + declare.debugDirectory)
+    shell.cp('-R', argv.debug, currentPath + '/' + declare.debugDirectory)
+    resolve()
+  })
+}

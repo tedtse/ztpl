@@ -1,0 +1,199 @@
+#!/usr/bin/env node
+
+var argv = require('minimist')(process.argv.slice(2))
+var co = require('co')
+var copyfiles = require('copyfiles')
+var exists = require('fs').existsSync
+var ora = require('ora')
+var path = require('path')
+var rm = require('rimraf').sync
+var shell = require('shelljs')
+var declare = require('../lib/declare.js')
+var modifySectionCode = require('../lib/modify-section-code.js')
+var utils = require('../lib/utils.js')
+var currentPath = process.cwd()
+var packageJSON = utils.getPackageJSON()
+
+var templateName = packageJSON.templateName
+var templateVersion = packageJSON.templateVersion
+var updateQueue = []
+var debugMode = !!argv.debug
+
+// co异步调用
+co(gen)
+
+// update 主流程
+function * gen () {
+  if (!debugMode) {
+    // 正常模式
+    yield getUpdateQueue()
+    yield * updateForEachVersion()
+    yield removeTpl()
+  } else {
+    // debug 模式
+    yield copyDebugTpl()
+    yield * forEachPathGenerate()
+    yield removeDebugTpl()
+  }
+}
+
+// 获得可升级的版本
+function getUpdateQueue () {
+  return utils.getVersions(templateName)
+    .then(function (versions) {
+      var index = versions.findIndex(function (ver) {
+        return ver === templateVersion
+      })
+      if (index !== -1) {
+        updateQueue = versions.slice(index + 1)
+      } else {
+        updateQueue = versions.slice(0)
+      }
+    })
+}
+
+function * updateForEachVersion () {
+  for (var i = 0, j = updateQueue.length; i < j; i++) {
+    var version = updateQueue[i]
+    yield downloadTpl(version)
+    yield * forEachPathGenerate()
+    // yield removeTpl()
+  }
+}
+
+// 下载 NPM 包模板
+function downloadTpl (version) {
+  var spinner = ora('downloading template')
+  spinner.start()
+  return new Promise(function (resolve, reject) {
+    shell.exec('npm install ' + templateName + '@' + version + ' --no-save --no-optional')
+    templateVersion = version
+    spinner.stop()
+    resolve()
+  })
+}
+
+// 处理每个 path ,是一个 generate
+function * forEachPathGenerate () {
+  var templateTrackPath
+  var templateTrack
+  if (debugMode) {
+    templateTrackPath = currentPath + '/' + declare.debugDirectory + '/' + declare.templateSetting + '/' + declare.templateTrack
+  } else {
+    templateTrackPath = currentPath + '/' + declare.nodeModules + '/' + templateName + '/' + declare.templateSetting + '/' + declare.templateTrack
+  }
+  // 清除 require 缓存
+  delete require.cache[templateTrackPath]
+  try {
+    templateTrack = require(templateTrackPath)
+  } catch (e) {
+    templateTrack = declare.defaultSettingModule
+  }
+  // track.js 配置文件中的文件一一处理
+  for (var _path in templateTrack) {
+    var item = templateTrack[_path]
+    var _type = typeof item === 'string' ? item : item.type
+    switch (_type) {
+      case 'add':
+        yield addHandler(_path)
+        break
+      case 'remove':
+        yield removeHandler(_path)
+        break
+      case 'overwrite':
+        yield overwriteHandler(_path)
+        break
+      case 'modify':
+        yield modifyHandler(_path, item.options)
+        break
+      default:
+        yield utils.done()
+        break
+    }
+  }
+  // 更新 package.json 文件
+  utils.writeTplInfoToPackageJSON(templateName, templateVersion)
+  yield executePostHook()
+}
+
+// 添加文件戓目录
+function addHandler (_path) {
+  var dest = path.dirname(_path)
+  var src
+  var depth
+  var options
+  if (debugMode) {
+    src = declare.debugDirectory + '/' + _path
+  } else {
+    src = declare.nodeModules + '/' + templateName + '/' + _path
+  }
+  depth = utils.isFile(currentPath + '/' + src) ? utils.depth(src) : utils.depth(src) + 1
+  options = {
+    up: depth,
+    soft: false,
+    all: true
+  }
+  return new Promise(function (resolve, reject) {
+    copyfiles([ src, dest ], options, function (err) {
+        if (err) {
+          console.error(err)
+          reject()
+        } else {
+          resolve()
+        }
+      }
+    )
+  })
+}
+
+// 删除文件或目录
+function removeHandler (_path) {
+  return new Promise(function (resolve, reject) {
+    if (exists(currentPath + '/' + _path)) {
+      rm(currentPath + '/' + _path)
+    }
+    resolve()
+  })
+}
+
+// 覆盖文件或目录
+function overwriteHandler (_path) {
+  if (exists(currentPath + '/' + _path)) {
+    rm(currentPath + '/' + _path)
+  }
+  return addHandler(_path)
+}
+
+// 修改文件
+function modifyHandler (_path, options) {
+  return modifySectionCode(_path, _path, options)
+}
+
+// 删除 NPM 模板
+function removeTpl () {
+  return new Promise(function (resolve, reject) {
+    shell.exec('npm remove ' + templateName)
+    resolve()
+  })
+}
+
+// 执行钩子函数
+function executePostHook () {
+  return utils.executeHook(debugMode, 'post-hook', packageJSON)
+}
+
+// 复制调试模板到本项目中
+function copyDebugTpl () {
+  return new Promise(function (resolve, reject) {
+    shell.cp('-R', argv.debug, currentPath + '/' + declare.debugDirectory)
+    resolve()
+  })
+}
+
+// 删除调试模板
+function removeDebugTpl () {
+  return new Promise(function (resolve, reject) {
+    rm(currentPath + '/' + declare.debugDirectory)
+    resolve()
+  })
+}

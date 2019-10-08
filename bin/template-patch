@@ -1,0 +1,88 @@
+#!/usr/bin/env node
+
+var argv = require('minimist')(process.argv.slice(2))
+var co = require('co')
+var fs = require('fs')
+var chalk = require('chalk')
+var json5 = require('json5')
+var rm = require('rimraf').sync
+var shell = require('shelljs')
+var ora = require('ora')
+var declare = require('../lib/declare.js')
+var utils = require('../lib/utils.js')
+var currentPath = process.cwd()
+var packageJSON = utils.getPackageJSON()
+
+var patchName
+var patchVersion
+var debugMode = !!argv.debug
+
+// co异步调用
+co(gen)
+
+// patch 主流程
+function * gen () {
+  if (!debugMode) {
+    // 正常模式
+    yield downloadPatch()
+    yield executePatch()
+    yield removePatch()
+  } else {
+    // debug 模式
+    yield copyDebugPatch()
+    yield executePatch()
+    yield removeDebugPatch()
+  }
+}
+
+function downloadPatch () {
+  if (!argv._.length) {
+    console.error(chalk.red('No patch found'))
+    process.exit(1)
+  }
+  patchName = argv._[0].replace(/@\d+\.\d+\.\d+/, '')
+  return new Promise(function (resolve, reject) {
+    var spinner = ora('downloading template')
+    spinner.start()
+    var result = shell.exec('npm install ' + argv._[0] + ' --no-save --no-optional')
+    patchVersion = result.stdout.match(/@(\d+\.\d+\.\d+)/) ? RegExp.$1 : ''
+    spinner.stop()
+    resolve()
+  })
+}
+
+// 执行补丁程序
+function executePatch () {
+  var patchPath
+  if (debugMode) {
+    patchPath = currentPath + '/' + declare.debugDirectory + '/' + declare.templateSetting + '/patch.js'
+  } else {
+    patchPath = currentPath + '/' + declare.nodeModules + '/' + patchName + '/' + declare.templateSetting + '/patch.js'
+  }
+  return utils.executePlugin(patchPath, packageJSON)
+}
+
+// 删除 NPM 补丁
+function removePatch () {
+  return new Promise(function (resolve, reject) {
+    shell.exec('npm remove ' + patchName)
+    resolve()
+  })
+}
+
+// 复制调试补丁到本地
+function copyDebugPatch () {
+  return new Promise(function (resolve, reject) {
+    rm(currentPath + '/' + declare.debugDirectory)
+    shell.cp('-R', argv.debug, currentPath + '/' + declare.debugDirectory)
+    resolve()
+  })
+}
+
+// 删除调试补丁
+function removeDebugPatch () {
+  return new Promise(function (resolve, reject) {
+    rm(currentPath + '/' + declare.debugDirectory)
+    resolve()
+  })
+}

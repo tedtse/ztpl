@@ -1,0 +1,14 @@
+.DS_Store
+node_modules/
+dist/
+.git
+.svn
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.project
